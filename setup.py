@@ -7,7 +7,7 @@ setup(
     package_dir={'': 'src'},
     install_requires=[
         'numpy',
-        'torch',  # Assuming we'll need PyTorch for neural network integration
+        'torch', # Assuming we'll need PyTorch for neural network integration
     ],
     author='Edan Meyer',
     description='A tool for visualizing neural network training metrics and weights',
