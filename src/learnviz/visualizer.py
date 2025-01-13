@@ -1,7 +1,7 @@
 import pygame
 import numpy as np
 from dataclasses import dataclass
-from typing import List, Tuple, Optional, Callable
+from typing import List, Tuple, Optional, Callable, Dict
 import numpy.typing as npt
 from .network_structure import NetworkSpec, LayerSpec
 from .serialization import StepData
@@ -21,6 +21,18 @@ class LayoutConfig:
     min_neuron_spacing: int = 70
     weight_line_width: int = 5
     zoom_speed: float = 0.1
+    button_width: int = 150
+    button_height: int = 30
+    button_margin: int = 10
+    button_text_size: int = 16
+
+
+@dataclass
+class Button:
+    """Represents a toggle button in the UI"""
+    rect: pygame.Rect
+    text: str
+    is_active: bool = True
 
 
 class NetworkVisualizer:
@@ -67,6 +79,13 @@ class NetworkVisualizer:
         # Calculate weight ranges and initialize UI
         self.weight_range = self._calculate_weight_range()
         self._initialize_ui()
+        
+        # Initialize buttons
+        self.buttons: Dict[str, Button] = {}
+        self._initialize_buttons()
+        
+        # Button states
+        self.show_weight_changes = False
 
 
     def _initialize_view(self):
@@ -123,7 +142,52 @@ class NetworkVisualizer:
             'negative': (255, 0, 0),
             'ui': (200, 200, 200),
             'slider_progress': (255, 0, 0),  # Red color for progress
+            'button_active': (240, 240, 240),
+            'button_inactive': (100, 100, 100),
+            'button_text_active': (50, 50, 50),
+            'button_text_inactive': (240, 240, 240),
         }
+
+
+    def _initialize_buttons(self):
+        """Initialize toggle buttons in top-left corner based on available data"""
+        # Get first step data to determine what's available
+        first_step = self.get_step_data(0)
+        
+        # Start with weights button which is always present
+        button_names = ['Toggle Weights']
+        
+        # Add buttons based on available data
+        if first_step.inputs is not None:
+            button_names.append('Toggle Inputs')
+        if first_step.activations is not None:
+            button_names.append('Toggle Activations')
+        if first_step.loss is not None:
+            button_names.append('Toggle Loss')
+            
+        # Add buttons for per-weight values
+        if first_step.per_weight_values:
+            for key in first_step.per_weight_values:
+                button_name = f"Toggle {key.replace('_', ' ').title()}"
+                button_names.append(button_name)
+                
+        # Add buttons for extra values
+        if first_step.extra_values:
+            for key in first_step.extra_values:
+                button_name = f"Toggle {key.replace('_', ' ').title()}"
+                button_names.append(button_name)
+        
+        # Create buttons
+        for i, name in enumerate(button_names):
+            self.buttons[name] = Button(
+                rect=pygame.Rect(
+                    self.layout.button_margin,
+                    self.layout.button_margin + i * (self.layout.button_height + self.layout.button_margin),
+                    self.layout.button_width,
+                    self.layout.button_height
+                ),
+                text=name
+            )
 
 
     def _handle_zoom(self, mouse_pos: Tuple[int, int], zoom_in: bool):
@@ -145,8 +209,14 @@ class NetworkVisualizer:
 
     def _handle_ui_click(self, mouse_pos: Tuple[int, int]):
         """Handle clicks on UI elements"""
+        # Check button clicks
+        for button in self.buttons.values():
+            if button.rect.collidepoint(mouse_pos):
+                button.is_active = not button.is_active
+                return
+                
         # Check if click is within vertical range of slider handle
-        handle_radius = 8  # Match the radius used in _draw_controls
+        handle_radius = 8
         if (abs(mouse_pos[1] - self.slider_rect.centery) <= handle_radius and 
             self.slider_rect.left <= mouse_pos[0] <= self.slider_rect.right):
             self.is_dragging_slider = True
@@ -221,6 +291,9 @@ class NetworkVisualizer:
 
     def _get_weight_color(self, weight: float) -> Tuple[int, int, int]:
         """Get the color for a weight based on its value"""
+        if not self.buttons['Toggle Weights'].is_active:
+            return self.colors['neutral']
+            
         max_abs = max(abs(self.weight_range[0]), abs(self.weight_range[1]))
         intensity = min(abs(weight) / max_abs, 1.0)
         
@@ -397,6 +470,22 @@ class NetworkVisualizer:
             )
 
 
+    def _draw_buttons(self):
+        """Draw all toggle buttons"""
+        font = pygame.font.Font(None, self.layout.button_text_size)
+        
+        for button in self.buttons.values():
+            # Draw button background
+            color = self.colors['button_active'] if button.is_active else self.colors['button_inactive']
+            pygame.draw.rect(self.screen, color, button.rect)
+            
+            # Draw button text
+            text_color = self.colors['button_text_active'] if button.is_active else self.colors['button_text_inactive']
+            text_surface = font.render(button.text, True, text_color)
+            text_rect = text_surface.get_rect(center=button.rect.center)
+            self.screen.blit(text_surface, text_rect)
+
+
     def _update_control_positions(self):
         """Update UI control positions based on current screen size"""
         screen_width, screen_height = self.screen.get_size()
@@ -520,13 +609,17 @@ class NetworkVisualizer:
             
             # Update step if playing
             if self.is_playing and current_time - self.last_update > self.update_interval:
-                self.current_step = (self.current_step + 1) % self.num_steps
+                if self.current_step < self.num_steps - 1:
+                    self.current_step += 1
+                else:
+                    self.is_playing = False  # Stop playing when we reach the end
                 self.last_update = current_time
             
             # Draw
             self.screen.fill(self.colors['background'])
             self._draw_network(self.get_step_data(self.current_step))
             self._draw_controls()
+            self._draw_buttons()
             
             pygame.display.flip()
             clock.tick(60)
@@ -542,13 +635,13 @@ if __name__ == '__main__':
                 layer_type='linear',
                 input_size=3,
                 output_size=4,
-                has_bias=True
+                has_bias=True,
             ),
             LayerSpec(
                 layer_type='linear',
                 input_size=4,
                 output_size=2,
-                has_bias=True
+                has_bias=True,
             )
         ],
         input_size=3,
@@ -569,7 +662,22 @@ if __name__ == '__main__':
             biases=[
                 rng.normal(0, 1, (4,)),    # First layer biases
                 rng.normal(0, 1, (2,))     # Second layer biases
-            ]
+            ],
+            loss=rng.normal(0, 1),
+            inputs=rng.normal(0, 1, (3,)),
+            activations=[
+                rng.normal(0, 1, (4,)),
+                rng.normal(0, 1, (2,))
+            ],
+            per_weight_values={
+                'step_size': [
+                    rng.normal(0, 1, (4, 3)),
+                    rng.normal(0, 1, (2, 4))
+                ],
+            },
+            extra_values={
+                'custom_metric': rng.uniform(0.5, 1.0)
+            }
         )
     
     # Create and run visualizer
