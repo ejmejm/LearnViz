@@ -5,6 +5,7 @@ from typing import List, Tuple, Optional, Callable, Dict
 import numpy.typing as npt
 from .network_structure import NetworkSpec, LayerSpec
 from .serialization import StepData
+from math import sqrt
 
 
 @dataclass
@@ -86,6 +87,11 @@ class NetworkVisualizer:
         
         # Button states
         self.show_weight_changes = False
+        
+        # Add these new attributes
+        self.hovered_weight = None
+        self.font = pygame.font.Font(None, 24)
+        self.hovered_neuron = None
 
 
     def _initialize_view(self):
@@ -136,7 +142,7 @@ class NetworkVisualizer:
         # Colors
         self.colors = {
             'background': (0, 0, 0),
-            'neuron': (240, 240, 240),
+            'neuron': (220, 220, 220),
             'neutral': (50, 50, 50),
             'positive': (0, 0, 255),
             'negative': (255, 0, 0),
@@ -146,6 +152,8 @@ class NetworkVisualizer:
             'button_inactive': (100, 100, 100),
             'button_text_active': (50, 50, 50),
             'button_text_inactive': (240, 240, 240),
+            'activation_positive': (0, 0, 255),  # Green for positive activations
+            'activation_negative': (255, 0, 0),  # Orange for negative activations
         }
 
 
@@ -311,6 +319,28 @@ class NetworkVisualizer:
             )
 
 
+    def _get_activation_color(self, value: float) -> Tuple[int, int, int]:
+        """Get color for an activation/input value"""
+        if value is None:
+            return self.colors['neuron']
+        
+        # Scale intensity based on absolute value
+        intensity = min(abs(value), 1.0)
+        
+        if value > 0:
+            # Interpolate between neutral and positive
+            return tuple(
+                int(n * (1 - intensity) + p * intensity)
+                for n, p in zip(self.colors['neuron'], self.colors['activation_positive'])
+            )
+        else:
+            # Interpolate between neutral and negative
+            return tuple(
+                int(n * (1 - intensity) + p * intensity)
+                for n, p in zip(self.colors['neuron'], self.colors['activation_negative'])
+            )
+
+
     def _world_to_screen(self, pos: Tuple[int, int]) -> Tuple[int, int]:
         """Convert world coordinates to screen coordinates"""
         x = int(pos[0] * self.zoom + self.pan_offset[0])
@@ -318,8 +348,154 @@ class NetworkVisualizer:
         return (x, y)
 
 
+    def _screen_to_world(self, pos: Tuple[int, int]) -> Tuple[float, float]:
+        """Convert screen coordinates to world coordinates"""
+        x = (pos[0] - self.pan_offset[0]) / self.zoom
+        y = (pos[1] - self.pan_offset[1]) / self.zoom
+        return (x, y)
+
+
+    def _find_hovered_weight(self, mouse_pos: Tuple[int, int], step_data: StepData):
+        """Find the weight that the mouse is hovering over"""
+        if not self.buttons['Toggle Weights'].is_active:
+            self.hovered_weight = None
+            return
+
+        world_pos = self._screen_to_world(mouse_pos)
+        
+        # Check each weight connection
+        for layer_idx, (weights, biases) in enumerate(zip(step_data.weights, step_data.biases)):
+            # Check weights between layers
+            for i, pos1 in enumerate(self.neuron_positions[layer_idx]):
+                for j, pos2 in enumerate(self.neuron_positions[layer_idx + 1]):
+                    # Calculate distance from point to line segment
+                    p1 = pygame.Vector2(pos1)
+                    p2 = pygame.Vector2(pos2)
+                    p3 = pygame.Vector2(world_pos)
+                    
+                    # Vector from p1 to p2
+                    line_vec = p2 - p1
+                    line_length = line_vec.length()
+                    if line_length == 0:
+                        continue
+                    
+                    # Vector from p1 to mouse
+                    point_vec = p3 - p1
+                    
+                    # Calculate projection
+                    t = max(0, min(1, point_vec.dot(line_vec) / (line_length * line_length)))
+                    
+                    # Find closest point on line
+                    closest = p1 + line_vec * t
+                    
+                    # Check if mouse is close enough to line
+                    distance = (p3 - closest).length()
+                    if distance < 5 / self.zoom:  # Adjust threshold as needed
+                        self.hovered_weight = {
+                            'value': weights[j, i],
+                            'pos': (closest.x, closest.y)
+                        }
+                        return
+
+            # Check bias connections if present
+            if biases is not None:
+                bias_x = (
+                    self.neuron_positions[layer_idx][0][0] + 
+                    self.layout.neuron_radius * 2
+                )
+                bias_y = (
+                    self.layout.height - self.layout.bottom_margin + 
+                    self.layout.neuron_radius
+                )
+                bias_pos = (bias_x, bias_y)
+                
+                for j, pos in enumerate(self.neuron_positions[layer_idx + 1]):
+                    p1 = pygame.Vector2(bias_pos)
+                    p2 = pygame.Vector2(pos)
+                    p3 = pygame.Vector2(world_pos)
+                    
+                    line_vec = p2 - p1
+                    line_length = line_vec.length()
+                    if line_length == 0:
+                        continue
+                    
+                    point_vec = p3 - p1
+                    t = max(0, min(1, point_vec.dot(line_vec) / (line_length * line_length)))
+                    closest = p1 + line_vec * t
+                    
+                    distance = (p3 - closest).length()
+                    if distance < 5 / self.zoom:
+                        self.hovered_weight = {
+                            'value': biases[j],
+                            'pos': (closest.x, closest.y)
+                        }
+                        return
+        
+        self.hovered_weight = None
+
+
+    def _find_hovered_neuron(self, mouse_pos: Tuple[int, int], step_data: StepData):
+        """Find the neuron that the mouse is hovering over and its value"""
+        # Reset hover states at start
+        self.hovered_neuron = None
+        self.hovered_weight = None  # Reset weight hover when checking neurons
+        
+        world_pos = self._screen_to_world(mouse_pos)
+        
+        # Check each neuron
+        for layer_idx, layer_positions in enumerate(self.neuron_positions):
+            for neuron_idx, pos in enumerate(layer_positions):
+                # Calculate distance from mouse to neuron center
+                distance = sqrt(
+                    (world_pos[0] - pos[0])**2 + 
+                    (world_pos[1] - pos[1])**2
+                )
+                
+                if distance < self.layout.neuron_radius:
+                    value = None
+                    if layer_idx == 0 and step_data.inputs is not None:
+                        value = step_data.inputs[neuron_idx]
+                    elif layer_idx > 0 and step_data.activations is not None:
+                        value = step_data.activations[layer_idx - 1][neuron_idx]
+                    
+                    if value is not None:
+                        self.hovered_neuron = {
+                            'value': value,
+                            'pos': pos
+                        }
+                    return
+        
+        # Check bias neurons if no regular neuron is hovered
+        for layer_idx, biases in enumerate(step_data.biases):
+            if biases is not None:
+                bias_x = (
+                    self.neuron_positions[layer_idx][0][0] + 
+                    self.layout.neuron_radius * 2
+                )
+                bias_y = (
+                    self.layout.height - self.layout.bottom_margin + 
+                    self.layout.neuron_radius
+                )
+                bias_pos = (bias_x, bias_y)
+                
+                distance = sqrt(
+                    (world_pos[0] - bias_pos[0])**2 + 
+                    (world_pos[1] - bias_pos[1])**2
+                )
+                
+                if distance < self.layout.neuron_radius:
+                    self.hovered_neuron = {
+                        'value': 1.0,  # Bias neurons always have value 1
+                        'pos': bias_pos
+                    }
+                    return
+        
+        # Only find hovered weight if no neuron is hovered
+        self._find_hovered_weight(mouse_pos, step_data)
+
+
     def _draw_network(self, step_data: StepData):
-        """Draw the network with current weights and biases"""
+        """Draw the network with current weights, biases, and activations"""
         # Draw weights
         for layer_idx, (weights, biases) in enumerate(zip(step_data.weights, step_data.biases)):
             # Draw weights between layers
@@ -385,14 +561,26 @@ class NetworkVisualizer:
                     0
                 )
         
-        # Draw neurons with antialiasing
-        for layer in self.neuron_positions:
-            for pos in layer:
+        # Draw neurons with activations
+        for layer_idx, layer in enumerate(self.neuron_positions):
+            for neuron_idx, pos in enumerate(layer):
                 screen_pos = self._world_to_screen(pos)
+                color = self.colors['neuron']
+                
+                # Color based on input/activation if available and buttons are active
+                if layer_idx == 0 and step_data.inputs is not None:
+                    if self.buttons['Toggle Inputs'].is_active:
+                        color = self._get_activation_color(step_data.inputs[neuron_idx])
+                elif layer_idx > 0 and step_data.activations is not None:
+                    if self.buttons['Toggle Activations'].is_active:
+                        color = self._get_activation_color(
+                            step_data.activations[layer_idx - 1][neuron_idx]
+                        )
+                
                 # Draw filled circle
                 pygame.draw.circle(
                     self.screen,
-                    self.colors['neuron'],
+                    color,
                     screen_pos,
                     int(self.layout.neuron_radius * self.zoom),
                     0
@@ -535,6 +723,11 @@ class NetworkVisualizer:
         while running:
             current_time = pygame.time.get_ticks()
             
+            # Get current mouse position and find hovered elements
+            mouse_pos = pygame.mouse.get_pos()
+            step_data = self.get_step_data(self.current_step)
+            self._find_hovered_neuron(mouse_pos, step_data)  # This now handles both neurons and weights
+            
             # Handle events
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
@@ -617,9 +810,39 @@ class NetworkVisualizer:
             
             # Draw
             self.screen.fill(self.colors['background'])
-            self._draw_network(self.get_step_data(self.current_step))
+            self._draw_network(step_data)
             self._draw_controls()
             self._draw_buttons()
+            
+            # Draw weight value if hovering
+            if self.hovered_weight:
+                screen_pos = self._world_to_screen(self.hovered_weight['pos'])
+                text = f"{self.hovered_weight['value']:.3f}"
+                text_surface = self.font.render(text, True, self.colors['ui'])
+                text_rect = text_surface.get_rect()
+                
+                # Offset the text position above and to the right of the cursor
+                offset_x = 5
+                offset_y = -4
+                text_rect.bottomleft = (screen_pos[0] + offset_x, screen_pos[1] + offset_y)
+                
+                # Add background for better visibility
+                padding = 4
+                bg_rect = text_rect.inflate(padding * 2, padding * 2)
+                pygame.draw.rect(self.screen, self.colors['background'], bg_rect)
+                self.screen.blit(text_surface, text_rect)
+            
+            if self.hovered_neuron:
+                screen_pos = self._world_to_screen(self.hovered_neuron['pos'])
+                text = f"{self.hovered_neuron['value']:.3f}"
+                text_surface = self.font.render(text, True, self.colors['ui'])
+                text_rect = text_surface.get_rect(center=screen_pos)
+                
+                # Add background for better visibility
+                padding = 4
+                bg_rect = text_rect.inflate(padding * 2, padding * 2)
+                pygame.draw.rect(self.screen, self.colors['background'], bg_rect)
+                self.screen.blit(text_surface, text_rect)
             
             pygame.display.flip()
             clock.tick(60)
