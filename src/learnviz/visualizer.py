@@ -53,6 +53,11 @@ class NetworkVisualizer:
         self.is_playing = False
         self.last_update = 0
         self.update_interval = 50  # ms between steps when playing
+        self.is_dragging_slider = False  # New state for slider dragging
+        self.key_repeat_delay = 300  # ms before key starts repeating
+        self.key_repeat_interval = 50  # ms between repeats
+        self.last_key_time = 0
+        self.key_held_since = 0
         
         # View transformation state
         self.zoom = 1.0
@@ -83,24 +88,30 @@ class NetworkVisualizer:
 
     def _initialize_ui(self):
         """Initialize UI elements and colors"""
-        # UI elements
+        # Calculate total control width (play button + slider)
+        play_button_width = 40
+        slider_width = self.layout.width - 400  # Reduced width to leave margins
+        total_width = play_button_width + 10 + slider_width  # 10px spacing between button and slider
+        
+        # Calculate left position to center everything
+        start_x = (self.layout.width - total_width) // 2
+        play_button_y = self.layout.height - 50
+        
+        # Position play button
+        self.play_pause_button_rect = pygame.Rect(
+            start_x,
+            play_button_y,
+            play_button_width,
+            40,
+        )
+        
+        # Position slider next to play button
+        slider_y = play_button_y + (self.play_pause_button_rect.height // 2) - 2
         self.slider_rect = pygame.Rect(
-            200,
-            self.layout.height - 60,
-            self.layout.width - 250,
-            20,
-        )
-        self.play_button_rect = pygame.Rect(
-            50,
-            self.layout.height - 60,
-            40,
-            40,
-        )
-        self.pause_button_rect = pygame.Rect(
-            100,
-            self.layout.height - 60,
-            40,
-            40,
+            start_x + play_button_width + 10,  # 10px spacing after play button
+            slider_y,
+            slider_width,
+            4,
         )
         
         # Colors
@@ -111,6 +122,7 @@ class NetworkVisualizer:
             'positive': (0, 0, 255),
             'negative': (255, 0, 0),
             'ui': (200, 200, 200),
+            'slider_progress': (255, 0, 0),  # Red color for progress
         }
 
 
@@ -133,14 +145,16 @@ class NetworkVisualizer:
 
     def _handle_ui_click(self, mouse_pos: Tuple[int, int]):
         """Handle clicks on UI elements"""
-        if self.slider_rect.collidepoint(mouse_pos):
+        # Check if click is within vertical range of slider handle
+        handle_radius = 8  # Match the radius used in _draw_controls
+        if (abs(mouse_pos[1] - self.slider_rect.centery) <= handle_radius and 
+            self.slider_rect.left <= mouse_pos[0] <= self.slider_rect.right):
+            self.is_dragging_slider = True
             rel_x = (mouse_pos[0] - self.slider_rect.left) / self.slider_rect.width
             self.current_step = int(rel_x * self.num_steps)
             self.current_step = max(0, min(self.current_step, self.num_steps - 1))
-        elif self.play_button_rect.collidepoint(mouse_pos):
-            self.is_playing = True
-        elif self.pause_button_rect.collidepoint(mouse_pos):
-            self.is_playing = False
+        elif self.play_pause_button_rect.collidepoint(mouse_pos):
+            self.is_playing = not self.is_playing
 
 
     def _calculate_neuron_positions(self) -> List[List[Tuple[int, int]]]:
@@ -314,72 +328,114 @@ class NetworkVisualizer:
 
     def _draw_controls(self):
         """Draw the UI controls"""
-        # Draw slider
-        pygame.draw.rect(self.screen, self.colors['ui'], self.slider_rect, 2)
+        # Calculate progress position
+        progress_width = (self.current_step / self.num_steps) * self.slider_rect.width
         
-        # Draw slider handle
-        handle_pos = (
-            self.slider_rect.left + 
-            (self.current_step / self.num_steps) * self.slider_rect.width
+        # Draw progress part of slider (red)
+        progress_rect = pygame.Rect(
+            self.slider_rect.left,
+            self.slider_rect.top,
+            progress_width,
+            self.slider_rect.height
+        )
+        pygame.draw.rect(
+            self.screen,
+            self.colors['slider_progress'],
+            progress_rect,
+            0
+        )
+        
+        # Draw remaining part of slider (white)
+        remaining_rect = pygame.Rect(
+            self.slider_rect.left + progress_width,
+            self.slider_rect.top,
+            self.slider_rect.width - progress_width,
+            self.slider_rect.height
         )
         pygame.draw.rect(
             self.screen,
             self.colors['ui'],
-            (handle_pos - 5, self.slider_rect.top - 5, 10, 30)
+            remaining_rect,
+            0
         )
         
-        # Draw play/pause buttons
-        pygame.draw.rect(self.screen, self.colors['ui'], self.play_button_rect, 2)
-        pygame.draw.rect(self.screen, self.colors['ui'], self.pause_button_rect, 2)
+        # Draw slider handle (red circle)
+        handle_pos = (
+            self.slider_rect.left + progress_width,
+            self.slider_rect.centery
+        )
+        pygame.draw.circle(
+            self.screen,
+            self.colors['slider_progress'],
+            handle_pos,
+            8
+        )
         
-        # Draw play/pause icons
+        # Draw play/pause icon based on state
         if not self.is_playing:
             # Play triangle
             pygame.draw.polygon(
                 self.screen,
                 self.colors['ui'],
                 [
-                    (self.play_button_rect.left + 10, self.play_button_rect.top + 10),
-                    (self.play_button_rect.left + 10, self.play_button_rect.bottom - 10),
-                    (self.play_button_rect.right - 10, self.play_button_rect.centery)
+                    (self.play_pause_button_rect.left + 10, self.play_pause_button_rect.top + 10),
+                    (self.play_pause_button_rect.left + 10, self.play_pause_button_rect.bottom - 10),
+                    (self.play_pause_button_rect.right - 10, self.play_pause_button_rect.centery)
                 ]
             )
-        
-        # Pause bars
-        pygame.draw.rect(
-            self.screen,
-            self.colors['ui'],
-            (self.pause_button_rect.left + 10, self.pause_button_rect.top + 10, 5, 20)
-        )
-        pygame.draw.rect(
-            self.screen,
-            self.colors['ui'],
-            (self.pause_button_rect.right - 15, self.pause_button_rect.top + 10, 5, 20)
-        )
+        else:
+            # Pause bars
+            pygame.draw.rect(
+                self.screen,
+                self.colors['ui'],
+                (self.play_pause_button_rect.left + 10, self.play_pause_button_rect.top + 10, 5, 20)
+            )
+            pygame.draw.rect(
+                self.screen,
+                self.colors['ui'],
+                (self.play_pause_button_rect.right - 15, self.play_pause_button_rect.top + 10, 5, 20)
+            )
 
 
     def _update_control_positions(self):
         """Update UI control positions based on current screen size"""
         screen_width, screen_height = self.screen.get_size()
         
+        # Calculate total control width (play button + slider)
+        play_button_width = 40
+        slider_width = screen_width - 400  # Reduced width to leave margins
+        total_width = play_button_width + 10 + slider_width  # 10px spacing between button and slider
+        
+        # Calculate left position to center everything
+        start_x = (screen_width - total_width) // 2
+        play_button_y = screen_height - 50
+        
+        # Position play button
+        self.play_pause_button_rect = pygame.Rect(
+            start_x,
+            play_button_y,
+            play_button_width,
+            40,
+        )
+        
+        # Position slider next to play button
+        slider_y = play_button_y + (self.play_pause_button_rect.height // 2) - 2
         self.slider_rect = pygame.Rect(
-            200,
-            screen_height - 60,
-            screen_width - 250,
-            20,
+            start_x + play_button_width + 10,  # 10px spacing after play button
+            slider_y,
+            slider_width,
+            4,
         )
-        self.play_button_rect = pygame.Rect(
-            50,
-            screen_height - 60,
-            40,
-            40,
-        )
-        self.pause_button_rect = pygame.Rect(
-            100,
-            screen_height - 60,
-            40,
-            40,
-        )
+
+
+    def _step_forward(self):
+        """Move one step forward"""
+        self.current_step = min(self.current_step + 1, self.num_steps - 1)
+
+
+    def _step_backward(self):
+        """Move one step backward"""
+        self.current_step = max(self.current_step - 1, 0)
 
 
     def run(self):
@@ -405,6 +461,16 @@ class NetworkVisualizer:
                 elif event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_SPACE:
                         self.is_playing = not self.is_playing
+                    elif event.key in (pygame.K_RIGHT, pygame.K_d, pygame.K_LEFT, pygame.K_a):
+                        self.key_held_since = current_time
+                        if event.key in (pygame.K_RIGHT, pygame.K_d):
+                            self._step_forward()
+                        else:
+                            self._step_backward()
+                
+                elif event.type == pygame.KEYUP:
+                    if event.key in (pygame.K_RIGHT, pygame.K_d, pygame.K_LEFT, pygame.K_a):
+                        self.key_held_since = 0
                 
                 elif event.type == pygame.MOUSEBUTTONDOWN:
                     mouse_pos = pygame.mouse.get_pos()
@@ -422,6 +488,8 @@ class NetworkVisualizer:
                 elif event.type == pygame.MOUSEBUTTONUP:
                     if event.button == 3:  # Right click release
                         self.is_panning = False
+                    elif event.button == 1:  # Left click release
+                        self.is_dragging_slider = False
                 
                 elif event.type == pygame.MOUSEMOTION:
                     # Handle panning
@@ -432,11 +500,23 @@ class NetworkVisualizer:
                         self.pan_offset[1] += delta_y
                         self.last_mouse_pos = event.pos
                     
-                    # Handle slider dragging
-                    elif event.buttons[0] and self.slider_rect.collidepoint(event.pos):
+                    # Handle slider dragging - now works even when mouse is off slider
+                    elif self.is_dragging_slider:
                         rel_x = (event.pos[0] - self.slider_rect.left) / self.slider_rect.width
+                        rel_x = max(0, min(1, rel_x))  # Clamp between 0 and 1
                         self.current_step = int(rel_x * self.num_steps)
                         self.current_step = max(0, min(self.current_step, self.num_steps - 1))
+            
+            # Handle key repeat for arrow/WASD keys
+            if self.key_held_since > 0:
+                time_held = current_time - self.key_held_since
+                if time_held > self.key_repeat_delay and current_time - self.last_key_time > self.key_repeat_interval:
+                    keys = pygame.key.get_pressed()
+                    if keys[pygame.K_RIGHT] or keys[pygame.K_d]:
+                        self._step_forward()
+                    elif keys[pygame.K_LEFT] or keys[pygame.K_a]:
+                        self._step_backward()
+                    self.last_key_time = current_time
             
             # Update step if playing
             if self.is_playing and current_time - self.last_update > self.update_interval:
