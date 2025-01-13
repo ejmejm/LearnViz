@@ -2,7 +2,6 @@ import pygame
 import numpy as np
 from dataclasses import dataclass
 from typing import List, Tuple, Optional, Callable, Dict
-import numpy.typing as npt
 from .network_structure import NetworkSpec, LayerSpec
 from .serialization import StepData
 from math import sqrt
