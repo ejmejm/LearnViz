@@ -1,19 +1,18 @@
 import numpy as np
 import pytest
-import os
 from typing import List, Tuple
 
-from learnviz.network_structure import LayerSpec, LayerType
+from learnviz.network_structure import LayerSpec, LayerType, NetworkSpec
 from learnviz.serialization import LearningDataSerializer, LearningDataDeserializer
 
 
 @pytest.fixture
 def simple_network() -> List[LayerSpec]:
     """Create a simple 2-layer network specification."""
-    return [
+    return NetworkSpec([
         LayerSpec(LayerType.LINEAR, 4, 8),
         LayerSpec(LayerType.LINEAR, 8, 2)
-    ]
+    ])
 
 
 @pytest.fixture
@@ -44,8 +43,8 @@ def test_basic_initialization(tmp_path, simple_network):
     deserializer.initialize(str(file_path))
     
     # Check network structure matches
-    assert len(deserializer.layers) == len(simple_network)
-    for orig, loaded in zip(simple_network, deserializer.layers):
+    assert len(deserializer.layers) == len(simple_network.layers)
+    for orig, loaded in zip(simple_network.layers, deserializer.layers):
         assert orig.layer_type == loaded.layer_type
         assert orig.input_size == loaded.input_size
         assert orig.output_size == loaded.output_size
@@ -72,11 +71,11 @@ def test_serialize_weights(tmp_path, simple_network, sample_weights):
     deserializer.close()
     
     # Check data matches
-    assert len(data['weights']) == len(weights)
-    assert len(data['biases']) == len(biases)
-    for w1, w2 in zip(weights, data['weights']):
+    assert len(data.weights) == len(weights)
+    assert len(data.biases) == len(biases)
+    for w1, w2 in zip(weights, data.weights):
         np.testing.assert_allclose(w1, w2)
-    for b1, b2 in zip(biases, data['biases']):
+    for b1, b2 in zip(biases, data.biases):
         np.testing.assert_allclose(b1, b2)
 
 
@@ -115,10 +114,10 @@ def test_serialize_with_extra_values(tmp_path, simple_network, sample_weights):
     deserializer.close()
     
     # Check extra values match
-    assert data['global_step'] == 42
+    assert data.extra_values['global_step'] == 42
     for i, (w_lr, b_lr) in enumerate(learning_rates):
-        np.testing.assert_allclose(w_lr, data['learning_rate'][i][0])
-        np.testing.assert_allclose(b_lr, data['learning_rate'][i][1])
+        np.testing.assert_allclose(w_lr, data.per_weight_values['learning_rate'][i][0])
+        np.testing.assert_allclose(b_lr, data.per_weight_values['learning_rate'][i][1])
 
 
 def test_serialize_with_all_options(tmp_path, simple_network, sample_weights):
@@ -163,11 +162,11 @@ def test_serialize_with_all_options(tmp_path, simple_network, sample_weights):
     deserializer.close()
     
     # Check all data matches
-    np.testing.assert_allclose(inputs, data['inputs'])
-    for act1, act2 in zip(activations, data['activations']):
+    np.testing.assert_allclose(inputs, data.inputs)
+    for act1, act2 in zip(activations, data.activations):
         np.testing.assert_allclose(act1, act2)
-    np.testing.assert_allclose(predictions, data['predictions'])
-    assert loss == data['loss']
+    np.testing.assert_allclose(predictions, data.predictions)
+    assert loss == data.loss
 
 
 def test_validation_errors(tmp_path, simple_network, sample_weights):
@@ -208,11 +207,11 @@ def test_half_precision(tmp_path, simple_network, sample_weights):
     deserializer.close()
     
     # Check data matches with reduced precision
-    assert data['weights'][0].dtype == np.float16
-    assert data['biases'][0].dtype == np.float16
-    for w1, w2 in zip(weights, data['weights']):
+    assert data.weights[0].dtype == np.float16
+    assert data.biases[0].dtype == np.float16
+    for w1, w2 in zip(weights, data.weights):
         np.testing.assert_allclose(w1, w2, rtol=1e-3)
-    for b1, b2 in zip(biases, data['biases']):
+    for b1, b2 in zip(biases, data.biases):
         np.testing.assert_allclose(b1, b2, rtol=1e-3)
 
 
@@ -246,9 +245,9 @@ def test_multiple_steps(tmp_path, simple_network, sample_weights):
         expected_weights = [w + step * 0.1 for w in weights]
         expected_biases = [b + step * 0.1 for b in biases]
         
-        for w1, w2 in zip(expected_weights, data['weights']):
+        for w1, w2 in zip(expected_weights, data.weights):
             np.testing.assert_allclose(w1, w2)
-        for b1, b2 in zip(expected_biases, data['biases']):
+        for b1, b2 in zip(expected_biases, data.biases):
             np.testing.assert_allclose(b1, b2)
     
     deserializer.close()
@@ -279,9 +278,9 @@ def test_step_iterator(tmp_path, simple_network, sample_weights):
         expected_weights = [w + step * 0.1 for w in weights]
         expected_biases = [b + step * 0.1 for b in biases]
         
-        for w1, w2 in zip(expected_weights, data['weights']):
+        for w1, w2 in zip(expected_weights, data.weights):
             np.testing.assert_allclose(w1, w2)
-        for b1, b2 in zip(expected_biases, data['biases']):
+        for b1, b2 in zip(expected_biases, data.biases):
             np.testing.assert_allclose(b1, b2)
     
     deserializer.close()

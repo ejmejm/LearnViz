@@ -1,8 +1,46 @@
 import numpy as np
 import struct
-from typing import Dict, List, Optional, Union, Tuple
+from typing import Dict, List, Optional, Union, Tuple, Iterator
+from dataclasses import dataclass
+import numpy.typing as npt
 
-from learnviz.network_structure import LayerSpec, LayerType
+from learnviz.network_structure import LayerSpec, LayerType, NetworkSpec
+
+
+@dataclass
+class StepData:
+    """Represents the data from a single training step of a neural network.
+    
+    This class contains all the data that can be collected during a single training
+    step, including weights, biases, intermediate values, and custom metrics.
+    
+    Attributes:
+        weights: List of weight matrices for each layer, shape (output_size, input_size)
+        biases: List of bias vectors for each layer, shape (output_size,). Can be None
+            for layers without biases
+        inputs: Input data for this training step, shape matches first layer's
+            input_size. Only present if store_inputs was True
+        activations: List of activation values for each layer, shape matches each
+            layer's output_size. Only present if store_activations was True
+        predictions: Model output for this training step, shape matches final layer's
+            output_size. Only present if store_predictions was True
+        loss: Loss value for this training step. Only present if store_loss was True
+        per_weight_values: Dictionary mapping names to lists of arrays that mirror the
+            weight matrices in size. Used for storing per-weight metrics like gradients
+            or momentum values. For each layer, contains either a single array matching
+            the weight matrix shape, or a tuple of (weight_array, bias_array) if the
+            layer has biases
+        extra_values: Dictionary of additional scalar values to store per step, like
+            learning rate or custom metrics. Values can be float, int, or bool
+    """
+    weights: List[npt.NDArray]
+    biases: List[Optional[npt.NDArray]]
+    inputs: Optional[npt.NDArray] = None
+    activations: Optional[List[npt.NDArray]] = None
+    predictions: Optional[npt.NDArray] = None
+    loss: Optional[float] = None
+    per_weight_values: dict[str, List[Union[npt.NDArray, Tuple[npt.NDArray, npt.NDArray]]]] = None
+    extra_values: dict[str, Union[float, int, bool]] = None
 
 
 class LearningDataSerializer:
@@ -23,7 +61,7 @@ class LearningDataSerializer:
     def initialize(
         self,
         file_path: str,
-        layers: List[LayerSpec],
+        network_spec: NetworkSpec,
         store_inputs: bool = False,
         store_activations: bool = False,
         store_predictions: bool = False,
@@ -36,7 +74,7 @@ class LearningDataSerializer:
         
         Args:
             file_path: Path where the binary file will be created
-            layers: List of layer specifications defining the network architecture
+            network_spec: Specification for the neural network architecture
             store_inputs: Whether to store input data for each step
             store_activations: Whether to store activation values for each layer
             store_predictions: Whether to store model predictions
@@ -47,7 +85,7 @@ class LearningDataSerializer:
             half_precision: Whether to use float16 instead of float32 for weights
         """
         self.file = open(file_path, 'wb')
-        self.layers = layers
+        self.layers = network_spec.layers
         self.store_inputs = store_inputs
         self.store_activations = store_activations
         self.store_predictions = store_predictions
@@ -65,8 +103,8 @@ class LearningDataSerializer:
         self.file.write(struct.pack('B', flags))
         
         # Write network structure...
-        self.file.write(struct.pack('I', len(layers)))
-        for layer in layers:
+        self.file.write(struct.pack('I', len(self.layers)))
+        for layer in self.layers:
             self.file.write(struct.pack('IIIB', 
                 layer.layer_type.value,
                 layer.input_size,
@@ -417,14 +455,14 @@ class LearningDataDeserializer:
         self._total_steps = data_size // self.step_size
 
 
-    def deserialize_step(self, step: int) -> Dict:
+    def deserialize_step(self, step: int) -> StepData:
         """Deserialize data from a specific step.
         
         Args:
             step: The step number to deserialize (0-based)
             
         Returns:
-            Dictionary containing the deserialized data
+            StepData object containing the deserialized data
         """
         if step >= self._total_steps:
             raise ValueError(f'Step {step} out of range (max: {self._total_steps - 1})')
@@ -434,11 +472,11 @@ class LearningDataDeserializer:
         return self._parse_step_data(data)
 
 
-    def iter_steps(self):
+    def iter_steps(self) -> Iterator[StepData]:
         """Iterator over all steps in the file.
         
         Yields:
-            Dictionary containing the deserialized data for each step
+            StepData object containing the deserialized data for each step
         """
         self.file.seek(self.header_size)
         for _ in range(self._total_steps):
@@ -446,11 +484,11 @@ class LearningDataDeserializer:
             yield self._parse_step_data(data)
 
 
-    def load_all_steps(self) -> List[Dict]:
+    def load_all_steps(self) -> List[StepData]:
         """Load all steps at once.
         
         Returns:
-            List of dictionaries containing the deserialized data for all steps
+            List of StepData objects containing the deserialized data for all steps
         """
         return list(self.iter_steps())
 
@@ -468,12 +506,12 @@ class LearningDataDeserializer:
         return self._total_steps
 
 
-    def _parse_step_data(self, data: Tuple) -> Dict:
-        """Parse raw step data into a structured dictionary."""
-        result = {
-            'weights': [],
-            'biases': []
-        }
+    def _parse_step_data(self, data: Tuple) -> StepData:
+        """Parse raw step data into a StepData object."""
+        weights = []
+        biases = []
+        per_weight_values = {}
+        extra_values = {}
         
         idx = 0
         float_dtype = np.float16 if self.half_precision else np.float32
@@ -485,67 +523,72 @@ class LearningDataDeserializer:
             # Get weights
             w = np.array(data[idx:idx + weight_size], dtype=float_dtype)
             w = w.reshape((layer.output_size, layer.input_size))
-            result['weights'].append(w)
+            weights.append(w)
             idx += weight_size
             
             # Get biases if present
             if layer.has_bias:
                 b = np.array(data[idx:idx + layer.output_size], dtype=float_dtype)
-                result['biases'].append(b)
+                biases.append(b)
                 idx += layer.output_size
             
             # Get per-weight values
             for name, dtype in self.per_weight_values.items():
-                if name not in result:
-                    result[name] = []
+                if name not in per_weight_values:
+                    per_weight_values[name] = []
                 
                 w_values = np.array(data[idx:idx + weight_size], dtype=dtype)
                 w_values = w_values.reshape((layer.output_size, layer.input_size))
                 idx += weight_size
                 
                 if layer.has_bias:
-                    b_values = np.array(
-                        data[idx:idx + layer.output_size], dtype=dtype
-                    )
+                    b_values = np.array(data[idx:idx + layer.output_size], dtype=dtype)
                     idx += layer.output_size
-                    result[name].append((w_values, b_values))
+                    per_weight_values[name].append((w_values, b_values))
                 else:
-                    result[name].append(w_values)
+                    per_weight_values[name].append(w_values)
         
         # Parse optional data
+        inputs = None
         if self.store_inputs:
             input_size = self.layers[0].input_size
-            result['inputs'] = np.array(
-                data[idx:idx + input_size], dtype=float_dtype
-            )
+            inputs = np.array(data[idx:idx + input_size], dtype=float_dtype)
             idx += input_size
         
+        activations = None
         if self.store_activations:
-            result['activations'] = []
+            activations = []
             for layer in self.layers:
-                act = np.array(
-                    data[idx:idx + layer.output_size], dtype=float_dtype
-                )
-                result['activations'].append(act)
+                act = np.array(data[idx:idx + layer.output_size], dtype=float_dtype)
+                activations.append(act)
                 idx += layer.output_size
         
+        predictions = None
         if self.store_predictions:
             output_size = self.layers[-1].output_size
-            result['predictions'] = np.array(
-                data[idx:idx + output_size], dtype=float_dtype
-            )
+            predictions = np.array(data[idx:idx + output_size], dtype=float_dtype)
             idx += output_size
         
+        loss = None
         if self.store_loss:
-            result['loss'] = float(data[idx])
+            loss = float(data[idx])
             idx += 1
         
         # Parse extra values
         for name, dtype in self.extra_values.items():
-            result[name] = dtype(data[idx])
+            extra_values[name] = dtype(data[idx])
             idx += 1
         
-        return result
+        return StepData(
+            weights=weights,
+            biases=biases,
+            inputs=inputs,
+            activations=activations,
+            predictions=predictions,
+            loss=loss,
+            per_weight_values=per_weight_values if per_weight_values else None,
+            extra_values=extra_values if extra_values else None
+        )
 
 
     def _create_step_format(self) -> None:
