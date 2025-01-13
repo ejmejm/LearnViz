@@ -4,7 +4,7 @@ import os
 from typing import List, Tuple
 
 from learnviz.network_structure import LayerSpec, LayerType
-from learnviz.serialization import LearningDataSerializer
+from learnviz.serialization import LearningDataSerializer, LearningDataDeserializer
 
 
 @pytest.fixture
@@ -31,32 +31,57 @@ def sample_weights(simple_network) -> Tuple[List[np.ndarray], List[np.ndarray]]:
 
 
 def test_basic_initialization(tmp_path, simple_network):
-    """Test basic initialization of the serializer."""
+    """Test basic initialization of the serializer and deserializer."""
     file_path = tmp_path / 'test.bin'
     
+    # Serialize
     serializer = LearningDataSerializer()
     serializer.initialize(str(file_path), simple_network)
     serializer.close()
     
-    assert os.path.exists(file_path)
-    assert os.path.getsize(file_path) > 0
+    # Deserialize
+    deserializer = LearningDataDeserializer()
+    deserializer.initialize(str(file_path))
+    
+    # Check network structure matches
+    assert len(deserializer.layers) == len(simple_network)
+    for orig, loaded in zip(simple_network, deserializer.layers):
+        assert orig.layer_type == loaded.layer_type
+        assert orig.input_size == loaded.input_size
+        assert orig.output_size == loaded.output_size
+        assert orig.has_bias == loaded.has_bias
+    
+    deserializer.close()
 
 
 def test_serialize_weights(tmp_path, simple_network, sample_weights):
-    """Test serializing weights and biases."""
+    """Test serializing and deserializing weights and biases."""
     file_path = tmp_path / 'test.bin'
     weights, biases = sample_weights
     
+    # Serialize
     serializer = LearningDataSerializer()
     serializer.initialize(str(file_path), simple_network)
-    
-    # Should work without error
     serializer.serialize_step(weights=weights, biases=biases)
     serializer.close()
+    
+    # Deserialize
+    deserializer = LearningDataDeserializer()
+    deserializer.initialize(str(file_path))
+    data = deserializer.deserialize_step(0)
+    deserializer.close()
+    
+    # Check data matches
+    assert len(data['weights']) == len(weights)
+    assert len(data['biases']) == len(biases)
+    for w1, w2 in zip(weights, data['weights']):
+        np.testing.assert_allclose(w1, w2)
+    for b1, b2 in zip(biases, data['biases']):
+        np.testing.assert_allclose(b1, b2)
 
 
 def test_serialize_with_extra_values(tmp_path, simple_network, sample_weights):
-    """Test serializing with extra per-weight and scalar values."""
+    """Test serializing and deserializing with extra per-weight and scalar values."""
     file_path = tmp_path / 'test.bin'
     weights, biases = sample_weights
     
@@ -66,6 +91,7 @@ def test_serialize_with_extra_values(tmp_path, simple_network, sample_weights):
         for w, b in zip(weights, biases)
     ]
     
+    # Serialize
     serializer = LearningDataSerializer()
     serializer.initialize(
         str(file_path),
@@ -74,21 +100,42 @@ def test_serialize_with_extra_values(tmp_path, simple_network, sample_weights):
         extra_values={'global_step': np.int32}
     )
     
-    # Should work without error
     serializer.serialize_step(
         weights=weights,
         biases=biases,
         per_weight_values={'learning_rate': learning_rates},
-        extra_values={'global_step': 0}
+        extra_values={'global_step': 42}
     )
     serializer.close()
+    
+    # Deserialize
+    deserializer = LearningDataDeserializer()
+    deserializer.initialize(str(file_path))
+    data = deserializer.deserialize_step(0)
+    deserializer.close()
+    
+    # Check extra values match
+    assert data['global_step'] == 42
+    for i, (w_lr, b_lr) in enumerate(learning_rates):
+        np.testing.assert_allclose(w_lr, data['learning_rate'][i][0])
+        np.testing.assert_allclose(b_lr, data['learning_rate'][i][1])
 
 
 def test_serialize_with_all_options(tmp_path, simple_network, sample_weights):
-    """Test serializing with all optional data enabled."""
+    """Test serializing and deserializing with all optional data enabled."""
     file_path = tmp_path / 'test.bin'
     weights, biases = sample_weights
     
+    # Create sample data
+    inputs = np.random.randn(4)
+    activations = [
+        np.random.randn(8),  # layer 1 output
+        np.random.randn(2)   # layer 2 output
+    ]
+    predictions = activations[-1]
+    loss = 0.5
+    
+    # Serialize
     serializer = LearningDataSerializer()
     serializer.initialize(
         str(file_path),
@@ -99,16 +146,6 @@ def test_serialize_with_all_options(tmp_path, simple_network, sample_weights):
         store_loss=True
     )
     
-    # Create sample data
-    inputs = np.random.randn(4)  # batch_size=32, input_size=4
-    activations = [
-        np.random.randn(8),  # layer 1 output
-        np.random.randn(2)   # layer 2 output
-    ]
-    predictions = activations[-1]
-    loss = 0.5
-    
-    # Should work without error
     serializer.serialize_step(
         weights=weights,
         biases=biases,
@@ -118,6 +155,19 @@ def test_serialize_with_all_options(tmp_path, simple_network, sample_weights):
         loss=loss
     )
     serializer.close()
+    
+    # Deserialize
+    deserializer = LearningDataDeserializer()
+    deserializer.initialize(str(file_path))
+    data = deserializer.deserialize_step(0)
+    deserializer.close()
+    
+    # Check all data matches
+    np.testing.assert_allclose(inputs, data['inputs'])
+    for act1, act2 in zip(activations, data['activations']):
+        np.testing.assert_allclose(act1, act2)
+    np.testing.assert_allclose(predictions, data['predictions'])
+    assert loss == data['loss']
 
 
 def test_validation_errors(tmp_path, simple_network, sample_weights):
@@ -141,13 +191,97 @@ def test_validation_errors(tmp_path, simple_network, sample_weights):
 
 
 def test_half_precision(tmp_path, simple_network, sample_weights):
-    """Test serialization with half precision."""
+    """Test serialization and deserialization with half precision."""
     file_path = tmp_path / 'test.bin'
     weights, biases = sample_weights
     
+    # Serialize
     serializer = LearningDataSerializer()
     serializer.initialize(str(file_path), simple_network, half_precision=True)
-    
-    # Should convert to float16
     serializer.serialize_step(weights=weights, biases=biases)
     serializer.close()
+    
+    # Deserialize
+    deserializer = LearningDataDeserializer()
+    deserializer.initialize(str(file_path))
+    data = deserializer.deserialize_step(0)
+    deserializer.close()
+    
+    # Check data matches with reduced precision
+    assert data['weights'][0].dtype == np.float16
+    assert data['biases'][0].dtype == np.float16
+    for w1, w2 in zip(weights, data['weights']):
+        np.testing.assert_allclose(w1, w2, rtol=1e-3)
+    for b1, b2 in zip(biases, data['biases']):
+        np.testing.assert_allclose(b1, b2, rtol=1e-3)
+
+
+def test_multiple_steps(tmp_path, simple_network, sample_weights):
+    """Test serializing and deserializing multiple steps."""
+    file_path = tmp_path / 'test.bin'
+    weights, biases = sample_weights
+    
+    # Serialize multiple steps
+    serializer = LearningDataSerializer()
+    serializer.initialize(str(file_path), simple_network)
+    
+    num_steps = 3
+    for step in range(num_steps):
+        # Modify weights slightly for each step
+        step_weights = [w + step * 0.1 for w in weights]
+        step_biases = [b + step * 0.1 for b in biases]
+        serializer.serialize_step(weights=step_weights, biases=step_biases)
+    
+    serializer.close()
+    
+    # Deserialize and check
+    deserializer = LearningDataDeserializer()
+    deserializer.initialize(str(file_path))
+    
+    assert deserializer.total_steps == num_steps
+    
+    # Test individual step access
+    for step in range(num_steps):
+        data = deserializer.deserialize_step(step)
+        expected_weights = [w + step * 0.1 for w in weights]
+        expected_biases = [b + step * 0.1 for b in biases]
+        
+        for w1, w2 in zip(expected_weights, data['weights']):
+            np.testing.assert_allclose(w1, w2)
+        for b1, b2 in zip(expected_biases, data['biases']):
+            np.testing.assert_allclose(b1, b2)
+    
+    deserializer.close()
+
+
+def test_step_iterator(tmp_path, simple_network, sample_weights):
+    """Test iterating over steps."""
+    file_path = tmp_path / 'test.bin'
+    weights, biases = sample_weights
+    
+    # Serialize multiple steps
+    serializer = LearningDataSerializer()
+    serializer.initialize(str(file_path), simple_network)
+    
+    num_steps = 3
+    for step in range(num_steps):
+        step_weights = [w + step * 0.1 for w in weights]
+        step_biases = [b + step * 0.1 for b in biases]
+        serializer.serialize_step(weights=step_weights, biases=step_biases)
+    
+    serializer.close()
+    
+    # Test iteration
+    deserializer = LearningDataDeserializer()
+    deserializer.initialize(str(file_path))
+    
+    for step, data in enumerate(deserializer.iter_steps()):
+        expected_weights = [w + step * 0.1 for w in weights]
+        expected_biases = [b + step * 0.1 for b in biases]
+        
+        for w1, w2 in zip(expected_weights, data['weights']):
+            np.testing.assert_allclose(w1, w2)
+        for b1, b2 in zip(expected_biases, data['biases']):
+            np.testing.assert_allclose(b1, b2)
+    
+    deserializer.close()

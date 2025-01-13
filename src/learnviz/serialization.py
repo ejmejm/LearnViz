@@ -1,10 +1,8 @@
-from dataclasses import dataclass
-from enum import Enum
 import numpy as np
 import struct
-from typing import Dict, List, Optional, Union, Sequence, Tuple
+from typing import Dict, List, Optional, Union, Tuple
 
-from learnviz.network_structure import LayerSpec
+from learnviz.network_structure import LayerSpec, LayerType
 
 
 class LearningDataSerializer:
@@ -69,11 +67,11 @@ class LearningDataSerializer:
         # Write network structure...
         self.file.write(struct.pack('I', len(layers)))
         for layer in layers:
-            self.file.write(struct.pack('BIIB', 
+            self.file.write(struct.pack('IIIB', 
                 layer.layer_type.value,
                 layer.input_size,
                 layer.output_size,
-                layer.has_bias
+                layer.has_bias,
             ))
         
         # Write per-weight values info
@@ -335,3 +333,300 @@ class LearningDataSerializer:
             return '?'
         else:
             raise ValueError(f'Unsupported dtype: {dtype}')
+
+
+class LearningDataDeserializer:
+    def __init__(self):
+        self.file = None
+        self.version = None
+        self.store_inputs = False
+        self.store_activations = False
+        self.store_predictions = False
+        self.store_loss = False
+        self.layers = []
+        self.per_weight_values = {}
+        self.extra_values = {}
+        self.half_precision = False
+        self.step_size = None
+        self.header_size = None
+        self._struct_format = None
+        self._total_steps = None
+
+
+    def initialize(self, file_path: str) -> None:
+        """Initialize the deserializer by reading the binary file header.
+        
+        Args:
+            file_path: Path to the binary file to read
+        """
+        self.file = open(file_path, 'rb')
+        
+        # Verify magic number
+        magic = self.file.read(5)
+        if magic != b'NNVIZ':
+            raise ValueError('Invalid file format')
+        
+        # Read version and flags
+        self.version = struct.unpack('B', self.file.read(1))[0]
+        flags = struct.unpack('B', self.file.read(1))[0]
+        
+        self.store_inputs = bool(flags & (1 << 0))
+        self.store_activations = bool(flags & (1 << 1))
+        self.store_predictions = bool(flags & (1 << 2))
+        self.store_loss = bool(flags & (1 << 3))
+        
+        # Read network structure
+        num_layers = struct.unpack('I', self.file.read(4))[0]
+        for _ in range(num_layers):
+            layer_type, input_size, output_size, has_bias = struct.unpack(
+                'IIIB', self.file.read(13)
+            )
+            self.layers.append(LayerSpec(
+                layer_type=LayerType(layer_type),
+                input_size=input_size,
+                output_size=output_size,
+                has_bias=bool(has_bias)
+            ))
+        
+        # Read per-weight values info
+        num_per_weight = struct.unpack('I', self.file.read(4))[0]
+        for _ in range(num_per_weight):
+            name_len = struct.unpack('B', self.file.read(1))[0]
+            name = self.file.read(name_len).decode('utf-8')
+            dtype_code = struct.unpack('B', self.file.read(1))[0]
+            self.per_weight_values[name] = self._code_to_dtype(dtype_code)
+        
+        # Read extra values info
+        num_extra = struct.unpack('I', self.file.read(4))[0]
+        for _ in range(num_extra):
+            name_len = struct.unpack('B', self.file.read(1))[0]
+            name = self.file.read(name_len).decode('utf-8')
+            dtype_code = struct.unpack('B', self.file.read(1))[0]
+            self.extra_values[name] = self._code_to_dtype(dtype_code)
+        
+        # Read precision flag and step size
+        self.half_precision = bool(struct.unpack('B', self.file.read(1))[0])
+        self.step_size = struct.unpack('Q', self.file.read(8))[0]
+        
+        self.header_size = self.file.tell()
+        self._create_step_format()
+        
+        # Calculate total steps
+        file_size = self._get_file_size()
+        data_size = file_size - self.header_size
+        self._total_steps = data_size // self.step_size
+
+
+    def deserialize_step(self, step: int) -> Dict:
+        """Deserialize data from a specific step.
+        
+        Args:
+            step: The step number to deserialize (0-based)
+            
+        Returns:
+            Dictionary containing the deserialized data
+        """
+        if step >= self._total_steps:
+            raise ValueError(f'Step {step} out of range (max: {self._total_steps - 1})')
+        
+        self.file.seek(self.header_size + step * self.step_size)
+        data = struct.unpack(self._struct_format, self.file.read(self.step_size))
+        return self._parse_step_data(data)
+
+
+    def iter_steps(self):
+        """Iterator over all steps in the file.
+        
+        Yields:
+            Dictionary containing the deserialized data for each step
+        """
+        self.file.seek(self.header_size)
+        for _ in range(self._total_steps):
+            data = struct.unpack(self._struct_format, self.file.read(self.step_size))
+            yield self._parse_step_data(data)
+
+
+    def load_all_steps(self) -> List[Dict]:
+        """Load all steps at once.
+        
+        Returns:
+            List of dictionaries containing the deserialized data for all steps
+        """
+        return list(self.iter_steps())
+
+
+    def close(self) -> None:
+        """Close the binary file."""
+        if self.file:
+            self.file.close()
+            self.file = None
+
+
+    @property
+    def total_steps(self) -> int:
+        """Get the total number of steps in the file."""
+        return self._total_steps
+
+
+    def _parse_step_data(self, data: Tuple) -> Dict:
+        """Parse raw step data into a structured dictionary."""
+        result = {
+            'weights': [],
+            'biases': []
+        }
+        
+        idx = 0
+        float_dtype = np.float16 if self.half_precision else np.float32
+        
+        # Parse weights, biases, and per-weight values
+        for layer in self.layers:
+            weight_size = layer.input_size * layer.output_size
+            
+            # Get weights
+            w = np.array(data[idx:idx + weight_size], dtype=float_dtype)
+            w = w.reshape((layer.output_size, layer.input_size))
+            result['weights'].append(w)
+            idx += weight_size
+            
+            # Get biases if present
+            if layer.has_bias:
+                b = np.array(data[idx:idx + layer.output_size], dtype=float_dtype)
+                result['biases'].append(b)
+                idx += layer.output_size
+            
+            # Get per-weight values
+            for name, dtype in self.per_weight_values.items():
+                if name not in result:
+                    result[name] = []
+                
+                w_values = np.array(data[idx:idx + weight_size], dtype=dtype)
+                w_values = w_values.reshape((layer.output_size, layer.input_size))
+                idx += weight_size
+                
+                if layer.has_bias:
+                    b_values = np.array(
+                        data[idx:idx + layer.output_size], dtype=dtype
+                    )
+                    idx += layer.output_size
+                    result[name].append((w_values, b_values))
+                else:
+                    result[name].append(w_values)
+        
+        # Parse optional data
+        if self.store_inputs:
+            input_size = self.layers[0].input_size
+            result['inputs'] = np.array(
+                data[idx:idx + input_size], dtype=float_dtype
+            )
+            idx += input_size
+        
+        if self.store_activations:
+            result['activations'] = []
+            for layer in self.layers:
+                act = np.array(
+                    data[idx:idx + layer.output_size], dtype=float_dtype
+                )
+                result['activations'].append(act)
+                idx += layer.output_size
+        
+        if self.store_predictions:
+            output_size = self.layers[-1].output_size
+            result['predictions'] = np.array(
+                data[idx:idx + output_size], dtype=float_dtype
+            )
+            idx += output_size
+        
+        if self.store_loss:
+            result['loss'] = float(data[idx])
+            idx += 1
+        
+        # Parse extra values
+        for name, dtype in self.extra_values.items():
+            result[name] = dtype(data[idx])
+            idx += 1
+        
+        return result
+
+
+    def _create_step_format(self) -> None:
+        """Create the struct format string for step data."""
+        format_chars = []
+        float_format = 'e' if self.half_precision else 'f'
+        
+        # Weights, biases, and per-weight values
+        for layer in self.layers:
+            weight_size = layer.input_size * layer.output_size
+            format_chars.extend([float_format] * weight_size)
+            
+            if layer.has_bias:
+                format_chars.extend([float_format] * layer.output_size)
+            
+            # Per-weight values
+            for dtype in self.per_weight_values.values():
+                format_chars.extend([self._get_dtype_format(dtype)] * weight_size)
+                if layer.has_bias:
+                    format_chars.extend(
+                        [self._get_dtype_format(dtype)] * layer.output_size
+                    )
+        
+        # Optional data
+        if self.store_inputs:
+            format_chars.extend([float_format] * self.layers[0].input_size)
+            
+        if self.store_activations:
+            for layer in self.layers:
+                format_chars.extend([float_format] * layer.output_size)
+                
+        if self.store_predictions:
+            format_chars.extend([float_format] * self.layers[-1].output_size)
+            
+        if self.store_loss:
+            format_chars.append(float_format)
+            
+        # Extra scalar values
+        for dtype in self.extra_values.values():
+            format_chars.append(self._get_dtype_format(dtype))
+            
+        self._struct_format = '<' + ''.join(format_chars)
+
+
+    def _get_file_size(self) -> int:
+        """Get the total size of the file in bytes."""
+        current_pos = self.file.tell()
+        self.file.seek(0, 2)  # Seek to end
+        size = self.file.tell()
+        self.file.seek(current_pos)  # Restore position
+        return size
+    
+
+    @staticmethod
+    def _code_to_dtype(code: int) -> np.dtype:
+        """Convert format code to numpy dtype."""
+        if code == 1:
+            return np.float16
+        elif code == 2:
+            return np.float32
+        elif code == 3:
+            return np.int32
+        elif code == 4:
+            return np.bool_
+        else:
+            raise ValueError(f'Unsupported dtype code: {code}')
+
+
+    @staticmethod
+    def _get_dtype_format(dtype: np.dtype) -> str:
+        """Convert numpy dtype to struct format character."""
+        dtype = np.dtype(dtype)
+        if dtype == np.float16:
+            return 'e'
+        elif dtype == np.float32:
+            return 'f'
+        elif dtype == np.int32:
+            return 'i'
+        elif dtype == np.bool_:
+            return '?'
+        else:
+            raise ValueError(f'Unsupported dtype: {dtype}')
+
+
