@@ -2,7 +2,7 @@ import pygame
 from typing import Dict, Tuple, List, Optional
 import numpy as np
 from ..serialization import StepData
-from .ui import LayoutConfig
+from .settings import LayoutConfig, DEFAULT_COLORS
 
 
 class GraphicsManager:
@@ -10,30 +10,13 @@ class GraphicsManager:
     def __init__(self):
         self.zoom = 1.0
         self.pan_offset = [0, 0]
-        self.colors = self._create_color_scheme()
+        self.colors = DEFAULT_COLORS.copy()  # Make a copy to avoid modifying the original
         self.font = pygame.font.Font(None, 24)
         self.hovered_weight = None
         self.hovered_neuron = None
         self.is_panning = False
         self.last_mouse_pos = None
-
-    def _create_color_scheme(self) -> Dict[str, Tuple[int, int, int]]:
-        """Create the default color scheme"""
-        return {
-            'background': (0, 0, 0),
-            'neuron': (220, 220, 220),
-            'neutral': (50, 50, 50),
-            'positive': (0, 0, 255),
-            'negative': (255, 0, 0),
-            'ui': (200, 200, 200),
-            'slider_progress': (255, 0, 0),
-            'button_active': (240, 240, 240),
-            'button_inactive': (100, 100, 100),
-            'button_text_active': (50, 50, 50),
-            'button_text_inactive': (240, 240, 240),
-            'activation_positive': (0, 0, 255),
-            'activation_negative': (255, 0, 0),
-        }
+        self.loss_range = (float('inf'), float('-inf'))  # (min_loss, max_loss)
 
     def world_to_screen(self, pos: Tuple[int, int]) -> Tuple[int, int]:
         """Convert world coordinates to screen coordinates"""
@@ -245,3 +228,176 @@ class GraphicsManager:
                 max_weight = max(max_weight, bias.max())
                 
         return min_weight, max_weight 
+
+    def _calculate_loss_range(self, step_data: StepData) -> None:
+        """Update min/max loss values"""
+        if step_data.loss is not None:
+            self.loss_range = (
+                min(self.loss_range[0], step_data.loss),
+                max(self.loss_range[1], step_data.loss)
+            )
+
+    def draw_loss_box(
+        self, 
+        screen: pygame.Surface, 
+        step_data: StepData,
+        neuron_positions: List[List[Tuple[int, int]]],
+        layout_config: LayoutConfig
+    ) -> None:
+        """Draw the loss box to the right of the network"""
+        if step_data.loss is None:
+            return
+
+        # Update loss range
+        self._calculate_loss_range(step_data)
+        
+        # Calculate box position (right of network, vertically centered)
+        rightmost_neuron_x = max(pos[0] for layer in neuron_positions for pos in layer)
+        network_center_y = sum(
+            pos[1] for layer in neuron_positions for pos in layer
+        ) / sum(len(layer) for layer in neuron_positions)
+        
+        base_font_size = 24  # Base font size before zoom
+        scaled_font_size = max(1, int(base_font_size * self.zoom))
+        scaled_font = pygame.font.Font(None, scaled_font_size)
+        
+        box_width = 150
+        box_height = 40
+        margin = 80
+        
+        box_x = rightmost_neuron_x + margin
+        box_y = network_center_y - box_height / 2
+        
+        # Convert to screen coordinates
+        screen_pos = self.world_to_screen((box_x, box_y))
+        box_rect = pygame.Rect(
+            screen_pos[0],
+            screen_pos[1],
+            int(box_width * self.zoom),
+            int(box_height * self.zoom)
+        )
+        
+        # Draw box background with darker color
+        darker_box_color = tuple(max(0, c - 20) for c in self.colors['loss_box'])
+        pygame.draw.rect(screen, darker_box_color, box_rect)
+        
+        # Calculate loss color based on min/max range
+        if self.loss_range[0] != self.loss_range[1]:
+            progress = (step_data.loss - self.loss_range[0]) / (self.loss_range[1] - self.loss_range[0])
+            color = tuple(
+                int(min_val + (max_val - min_val) * progress)
+                for min_val, max_val in zip(
+                    self.colors['loss_min'],
+                    self.colors['loss_max']
+                )
+            )
+        else:
+            color = self.colors['loss_min']
+        
+        # Draw loss text with scaled font
+        text = f"Loss: {step_data.loss:.3g}"
+        text_surface = scaled_font.render(text, True, color)
+        text_rect = text_surface.get_rect(center=box_rect.center)
+        screen.blit(text_surface, text_rect) 
+
+    def draw_value_boxes(
+        self, 
+        screen: pygame.Surface, 
+        step_data: StepData,
+        neuron_positions: List[List[Tuple[int, int]]],
+        layout_config: LayoutConfig,
+        ui_manager
+    ) -> None:
+        """Draw the loss and extra value boxes to the right of the network"""
+        # Collect all values to display
+        values_to_display = []
+        
+        # Always add loss first if it exists and is toggled
+        if step_data.loss is not None and ui_manager.get_button_state('Toggle Loss'):
+            self._calculate_loss_range(step_data)
+            values_to_display.append(('Loss', step_data.loss, True))
+            
+        # Add extra values if they exist and are toggled
+        if step_data.extra_values:
+            for key, value in step_data.extra_values.items():
+                button_name = f"Toggle {key.replace('_', ' ').title()}"
+                if ui_manager.get_button_state(button_name):
+                    values_to_display.append((key.replace('_', ' ').title(), value, False))
+        
+        if not values_to_display:
+            return
+            
+        # Prepare font and calculate scaled dimensions
+        base_font_size = 24
+        scaled_font_size = max(1, int(base_font_size * self.zoom))
+        scaled_font = pygame.font.Font(None, scaled_font_size)
+        
+        # Calculate box dimensions based on longest label
+        box_height = int(40 * self.zoom)  # Scale box height with zoom
+        box_spacing = int(10 * self.zoom)  # Scale spacing with zoom
+        margin = int(80 * self.zoom)  # Scale margin with zoom
+        value_margin = int(10 * self.zoom)  # Scale value margin with zoom
+        
+        # Calculate box width based on longest label at current zoom level
+        longest_label = max((label for label, _, _ in values_to_display), key=len)
+        label_width = scaled_font.size(longest_label + ': ')[0]
+        box_width = label_width + int(20 * self.zoom)  # Add scaled padding
+        
+        # Calculate total height of all boxes
+        total_height = len(values_to_display) * box_height + (len(values_to_display) - 1) * box_spacing
+        
+        # Calculate starting positions
+        rightmost_neuron_x = max(pos[0] for layer in neuron_positions for pos in layer)
+        network_center_y = sum(
+            pos[1] for layer in neuron_positions for pos in layer
+        ) / sum(len(layer) for layer in neuron_positions)
+        
+        start_y = network_center_y - total_height / 2
+        box_x = rightmost_neuron_x + margin
+        
+        # Draw each value box and its corresponding value
+        for i, (label, value, is_loss) in enumerate(values_to_display):
+            box_y = start_y + i * (box_height + box_spacing)
+            
+            # Convert to screen coordinates
+            screen_pos = self.world_to_screen((box_x, box_y))
+            box_rect = pygame.Rect(
+                screen_pos[0],
+                screen_pos[1],
+                box_width,  # Already scaled width
+                box_height  # Already scaled height
+            )
+            
+            # Draw box background
+            darker_box_color = tuple(max(0, c - 20) for c in self.colors['loss_box'])
+            pygame.draw.rect(screen, darker_box_color, box_rect)
+            
+            # Draw label (always white, right-aligned)
+            label_text = f"{label}: "
+            label_surface = scaled_font.render(label_text, True, self.colors['ui'])
+            label_rect = label_surface.get_rect()
+            label_rect.right = box_rect.right - int(5 * self.zoom)  # Scale padding
+            label_rect.centery = box_rect.centery
+            screen.blit(label_surface, label_rect)
+            
+            # Draw value (outside box)
+            value_text = f"{value:.3g}"
+            
+            # Determine value color
+            if is_loss and self.loss_range[0] != self.loss_range[1]:
+                progress = (value - self.loss_range[0]) / (self.loss_range[1] - self.loss_range[0])
+                color = tuple(
+                    int(min_val + (max_val - min_val) * progress)
+                    for min_val, max_val in zip(
+                        self.colors['loss_min'],
+                        self.colors['loss_max']
+                    )
+                )
+            else:
+                color = self.colors['ui']
+            
+            value_surface = scaled_font.render(value_text, True, color)
+            value_rect = value_surface.get_rect()
+            value_rect.left = box_rect.right + value_margin
+            value_rect.centery = box_rect.centery
+            screen.blit(value_surface, value_rect) 

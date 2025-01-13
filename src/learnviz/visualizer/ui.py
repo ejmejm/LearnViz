@@ -2,26 +2,7 @@ from dataclasses import dataclass
 import pygame
 from typing import Dict, Tuple, Optional, Any
 from ..serialization import StepData
-
-
-@dataclass
-class LayoutConfig:
-    """Configuration for the visualization layout"""
-    width: int = 1200
-    height: int = 800
-    top_margin: int = 100  # For loss display
-    bottom_margin: int = 100  # For controls
-    horizontal_margin: int = 50
-    neuron_radius: int = 30
-    min_layer_spacing: int = 60
-    max_layer_spacing: int = 300
-    min_neuron_spacing: int = 70
-    weight_line_width: int = 5
-    zoom_speed: float = 0.1
-    button_width: int = 150
-    button_height: int = 30
-    button_margin: int = 10
-    button_text_size: int = 16
+from .settings import LayoutConfig, DEFAULT_COLORS, UIConfig
 
 
 @dataclass
@@ -41,22 +22,11 @@ class UIManager:
         self.is_dragging_slider = False
         self.play_pause_button_rect: Optional[pygame.Rect] = None
         self.slider_rect: Optional[pygame.Rect] = None
-        self.colors = self._create_color_scheme()
+        self.colors = DEFAULT_COLORS.copy()  # Make a copy to avoid modifying the original
         self.font = pygame.font.Font(None, self.layout.button_text_size)
         self.current_step = 0
         self.last_update = 0
-        self.update_interval = 50
-
-    def _create_color_scheme(self) -> Dict[str, Tuple[int, int, int]]:
-        """Create the default color scheme for UI elements"""
-        return {
-            'ui': (200, 200, 200),
-            'slider_progress': (255, 0, 0),
-            'button_active': (240, 240, 240),
-            'button_inactive': (100, 100, 100),
-            'button_text_active': (50, 50, 50),
-            'button_text_inactive': (240, 240, 240),
-        }
+        self.update_interval = UIConfig.UPDATE_INTERVAL
 
     def initialize_buttons(self, step_data: StepData) -> None:
         """Initialize toggle buttons based on available data"""

@@ -6,6 +6,7 @@ from .ui import LayoutConfig, UIManager
 from .graphics import GraphicsManager
 from ..network_structure import NetworkSpec, LayerSpec
 from ..serialization import StepData
+from .settings import LayoutConfig, UIConfig
 
 
 class NetworkVisualizer:
@@ -43,9 +44,9 @@ class NetworkVisualizer:
         # UI state
         self.current_step = 0
         self.last_update = 0
-        self.update_interval = 50  # ms between steps when playing
-        self.key_repeat_delay = 300  # ms before key starts repeating
-        self.key_repeat_interval = 50  # ms between repeats
+        self.update_interval = UIConfig.UPDATE_INTERVAL
+        self.key_repeat_delay = UIConfig.KEY_REPEAT_DELAY
+        self.key_repeat_interval = UIConfig.KEY_REPEAT_INTERVAL
         self.last_key_time = 0
         self.key_held_since = 0
         
@@ -57,19 +58,41 @@ class NetworkVisualizer:
         self.graphics.weight_range = self.graphics._calculate_weight_range(first_step)
 
     def _initialize_view(self) -> None:
-        """Initialize camera position to center on network"""
-        network_center_x = (
-            self.neuron_positions[0][0][0] + 
-            self.neuron_positions[-1][0][0]
-        ) / 2
-        network_center_y = sum(
+        """Initialize camera position to center on network and value boxes"""
+        # Calculate network bounds
+        leftmost_x = min(pos[0] for layer in self.neuron_positions for pos in layer)
+        rightmost_x = max(pos[0] for layer in self.neuron_positions for pos in layer)
+        
+        # Estimate value boxes position (if they exist)
+        has_value_boxes = (
+            self.get_step_data(0).loss is not None or 
+            bool(self.get_step_data(0).extra_values)
+        )
+        
+        if has_value_boxes:
+            # Estimate value boxes width (box + margin + value)
+            value_box_margin = 80
+            estimated_box_width = 150  # Base box width
+            estimated_value_width = 100  # Estimated width for value display
+            value_margin = 10
+            total_value_box_width = estimated_box_width + value_margin + estimated_value_width
+            
+            # Extend rightmost bound to include value boxes
+            rightmost_x = rightmost_x + value_box_margin + total_value_box_width
+        
+        # Calculate center x position
+        center_x = (leftmost_x + rightmost_x) / 2
+        
+        # Calculate center y position from network
+        center_y = sum(
             pos[1] for layer in self.neuron_positions 
             for pos in layer
         ) / sum(len(layer) for layer in self.neuron_positions)
         
+        # Set pan offset to center the view
         self.graphics.pan_offset = [
-            self.layout.width / 2 - network_center_x,
-            self.layout.height / 2 - network_center_y,
+            self.layout.width / 2 - center_x,
+            self.layout.height / 2 - center_y,
         ]
 
     def _calculate_neuron_positions(self) -> List[List[Tuple[int, int]]]:
@@ -223,12 +246,22 @@ class NetworkVisualizer:
                 show_inputs=self.ui.get_button_state('Toggle Inputs'),
                 show_activations=self.ui.get_button_state('Toggle Activations')
             )
+            
+            # Replace the old loss box drawing with the new value boxes
+            self.graphics.draw_value_boxes(
+                self.screen,
+                step_data,
+                self.neuron_positions,
+                self.layout,
+                self.ui
+            )
+            
             self.ui.draw_controls(self.screen, self.current_step, self.num_steps)
             self.ui.draw_buttons(self.screen)
             self.graphics.draw_hover_info(self.screen)
             
             pygame.display.flip()
-            clock.tick(60)
+            clock.tick(UIConfig.FPS)
         
         pygame.quit()
 
